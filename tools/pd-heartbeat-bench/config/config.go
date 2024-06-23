@@ -53,6 +53,11 @@ type Config struct {
 	ReportRatio       float64 `toml:"report-ratio" json:"report-ratio"`
 	Sample            bool    `toml:"sample" json:"sample"`
 	Round             int     `toml:"round" json:"round"`
+
+	// Customized flags
+	StoreIdOffset        uint64 `toml:"store-id-offset" json:"store-id-offset"`
+	RegionIdOffset       uint64 `toml:"region-id-offset" json:"region-id-offset"`
+	RegionReportInterval uint64 `toml:"region-report-interval-sec" json:"region-report-interval-sec"`
 }
 
 // NewConfig return a set of settings.
@@ -69,6 +74,12 @@ func NewConfig() *Config {
 	fs.StringVar(&cfg.Security.CertPath, "cert", "", "path of file that contains X509 certificate in PEM format")
 	fs.StringVar(&cfg.Security.KeyPath, "key", "", "path of file that contains X509 key in PEM format")
 	fs.Uint64Var(&cfg.InitEpochVer, "epoch-ver", 1, "the initial epoch version value")
+	fs.Uint64Var(&cfg.StoreIdOffset, "store-id-offset", 0, "the store id offset")
+	fs.Uint64Var(&cfg.RegionIdOffset, "region-id-offset", 0, "the region id offset")
+	fs.Uint64Var(&cfg.RegionReportInterval, "region-report-interval-sec", 60, "the interval of region report")
+	fs.IntVar(&cfg.RegionCount, "region-count", 10000, "the total number of regions")
+	fs.IntVar(&cfg.StoreCount, "store-count", 10, "the total number of stores")
+	fs.IntVar(&cfg.Round, "round", 1, "the number of rounds for region heartbeat")
 
 	return cfg
 }

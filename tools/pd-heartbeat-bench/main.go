@@ -51,15 +51,14 @@ import (
 )
 
 const (
-	bytesUnit            = 128
-	keysUint             = 8
-	queryUnit            = 8
-	hotByteUnit          = 16 * units.KiB
-	hotKeysUint          = 256
-	hotQueryUnit         = 256
-	regionReportInterval = 60 // 60s
-	storeReportInterval  = 10 // 10s
-	capacity             = 4 * units.TiB
+	bytesUnit           = 128
+	keysUint            = 8
+	queryUnit           = 8
+	hotByteUnit         = 16 * units.KiB
+	hotKeysUint         = 256
+	hotQueryUnit        = 256
+	storeReportInterval = 10 // 10s
+	capacity            = 4 * units.TiB
 )
 
 var (
@@ -109,7 +108,7 @@ func header() *pdpb.RequestHeader {
 	}
 }
 
-func bootstrap(ctx context.Context, cli pdpb.PDClient) {
+func bootstrap(ctx context.Context, cfg *config.Config, cli pdpb.PDClient) {
 	cctx, cancel := context.WithCancel(ctx)
 	isBootstrapped, err := cli.IsBootstrapped(cctx, &pdpb.IsBootstrappedRequest{Header: header()})
 	cancel()
@@ -121,14 +120,16 @@ func bootstrap(ctx context.Context, cli pdpb.PDClient) {
 		return
 	}
 
+	initialStoreId := cfg.StoreIdOffset + 1
 	store := &metapb.Store{
-		Id:      1,
-		Address: fmt.Sprintf("localhost:%d", 2),
-		Version: "6.4.0-alpha",
+		Id:      initialStoreId,
+		Address: fmt.Sprintf("localhost:%d", initialStoreId),
+		// TODO: make this configurable
+		Version: "7.1.0",
 	}
 	region := &metapb.Region{
-		Id:          1,
-		Peers:       []*metapb.Peer{{StoreId: 1, Id: 1}},
+		Id:          cfg.RegionIdOffset + 1,
+		Peers:       []*metapb.Peer{{StoreId: initialStoreId, Id: initialStoreId}},
 		RegionEpoch: &metapb.RegionEpoch{ConfVer: 1, Version: 1},
 	}
 	req := &pdpb.BootstrapRequest{
@@ -149,11 +150,11 @@ func bootstrap(ctx context.Context, cli pdpb.PDClient) {
 }
 
 func putStores(ctx context.Context, cfg *config.Config, cli pdpb.PDClient, stores *Stores) {
-	for i := uint64(1); i <= uint64(cfg.StoreCount); i++ {
+	for i := uint64(cfg.StoreIdOffset + 1); i <= (uint64(cfg.StoreCount) + cfg.StoreIdOffset); i++ {
 		store := &metapb.Store{
 			Id:      i,
 			Address: fmt.Sprintf("localhost:%d", i),
-			Version: "6.4.0-alpha",
+			Version: "7.1.0",
 		}
 		cctx, cancel := context.WithCancel(ctx)
 		resp, err := cli.PutStore(cctx, &pdpb.PutStoreRequest{Header: header(), Store: store})
@@ -170,7 +171,7 @@ func putStores(ctx context.Context, cfg *config.Config, cli pdpb.PDClient, store
 			for {
 				select {
 				case <-heartbeatTicker.C:
-					stores.heartbeat(ctx, cli, storeID)
+					stores.heartbeat(ctx, cli, storeID, cfg.StoreIdOffset)
 				case <-ctx.Done():
 					return
 				}
@@ -197,7 +198,7 @@ func (rs *Regions) init(cfg *config.Config, options *config.Options) {
 	rs.updateRound = 0
 
 	// Generate regions
-	id := uint64(1)
+	id := uint64(cfg.RegionIdOffset + 1)
 	now := uint64(time.Now().Unix())
 
 	for i := 0; i < cfg.RegionCount; i++ {
@@ -205,14 +206,14 @@ func (rs *Regions) init(cfg *config.Config, options *config.Options) {
 			Header: header(),
 			Region: &metapb.Region{
 				Id:          id,
-				StartKey:    codec.GenerateTableKey(int64(i)),
-				EndKey:      codec.GenerateTableKey(int64(i + 1)),
+				StartKey:    codec.GenerateTableKey(int64(id)),
+				EndKey:      codec.GenerateTableKey(int64(id) + 1),
 				RegionEpoch: &metapb.RegionEpoch{ConfVer: 2, Version: maxVersion},
 			},
 			ApproximateSize: bytesUnit,
 			Interval: &pdpb.TimeInterval{
 				StartTimestamp: now,
-				EndTimestamp:   now + regionReportInterval,
+				EndTimestamp:   now + cfg.RegionReportInterval,
 			},
 			QueryStats:      &pdpb.QueryStats{},
 			ApproximateKeys: keysUint,
@@ -228,7 +229,7 @@ func (rs *Regions) init(cfg *config.Config, options *config.Options) {
 
 		peers := make([]*metapb.Peer, 0, cfg.Replica)
 		for j := 0; j < cfg.Replica; j++ {
-			peers = append(peers, &metapb.Peer{Id: id, StoreId: uint64((i+j)%cfg.StoreCount + 1)})
+			peers = append(peers, &metapb.Peer{Id: id, StoreId: uint64((i+j)%cfg.StoreCount+1) + cfg.StoreIdOffset})
 			id += 1
 		}
 
@@ -280,7 +281,7 @@ func (rs *Regions) update(cfg *config.Config, options *config.Options) {
 	// update flow
 	for _, i := range rs.updateFlow {
 		region := rs.regions[i]
-		if region.Leader.StoreId <= uint64(options.GetHotStoreCount()) {
+		if region.Leader.StoreId-cfg.StoreIdOffset <= uint64(options.GetHotStoreCount()) {
 			region.BytesWritten = uint64(hotByteUnit * (1 + rand.Float64()) * 60)
 			region.BytesRead = uint64(hotByteUnit * (1 + rand.Float64()) * 10)
 			region.KeysWritten = uint64(hotKeysUint * (1 + rand.Float64()) * 60)
@@ -304,7 +305,7 @@ func (rs *Regions) update(cfg *config.Config, options *config.Options) {
 	// update interval
 	for _, region := range rs.regions {
 		region.Interval.StartTimestamp = region.Interval.EndTimestamp
-		region.Interval.EndTimestamp = region.Interval.StartTimestamp + regionReportInterval
+		region.Interval.EndTimestamp = region.Interval.StartTimestamp + cfg.RegionReportInterval
 	}
 	for _, i := range reportRegions {
 		region := rs.regions[i]
@@ -389,18 +390,18 @@ func newStores(storeCount int) *Stores {
 	}
 }
 
-func (s *Stores) heartbeat(ctx context.Context, cli pdpb.PDClient, storeID uint64) {
+func (s *Stores) heartbeat(ctx context.Context, cli pdpb.PDClient, storeID uint64, storeIdOffset uint64) {
 	cctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	cli.StoreHeartbeat(cctx, &pdpb.StoreHeartbeatRequest{Header: header(), Stats: s.stat[storeID].Load().(*pdpb.StoreStats)})
+	cli.StoreHeartbeat(cctx, &pdpb.StoreHeartbeatRequest{Header: header(), Stats: s.stat[storeID-storeIdOffset].Load().(*pdpb.StoreStats)})
 }
 
-func (s *Stores) update(rs *Regions) {
+func (s *Stores) update(rs *Regions, storeIdOffset uint64) {
 	stats := make([]*pdpb.StoreStats, len(s.stat))
 	now := uint64(time.Now().Unix())
 	for i := range stats {
 		stats[i] = &pdpb.StoreStats{
-			StoreId:    uint64(i),
+			StoreId:    uint64(i) + storeIdOffset,
 			Capacity:   capacity,
 			Available:  capacity,
 			QueryStats: &pdpb.QueryStats{},
@@ -420,12 +421,12 @@ func (s *Stores) update(rs *Regions) {
 	}
 	for _, region := range toUpdate {
 		for _, peer := range region.Region.Peers {
-			store := stats[peer.StoreId]
+			store := stats[peer.StoreId-storeIdOffset]
 			store.UsedSize += region.ApproximateSize
 			store.Available -= region.ApproximateSize
 			store.RegionCount += 1
 		}
-		store := stats[region.Leader.StoreId]
+		store := stats[region.Leader.StoreId-storeIdOffset]
 		if region.BytesWritten != 0 {
 			store.BytesWritten += region.BytesWritten
 			store.BytesRead += region.BytesRead
@@ -504,19 +505,37 @@ func main() {
 		log.Fatal("create client error", zap.Error(err))
 	}
 
+	log.Info("start benchmark tool with configs", zap.String("StoreCount", fmt.Sprintf("%d", cfg.StoreCount)),
+		zap.String("RegionCount", fmt.Sprintf("%d", cfg.RegionCount)),
+		zap.String("Round", fmt.Sprintf("%d", cfg.Round)),
+		zap.String("ReportRatio", fmt.Sprintf("%.4f", cfg.ReportRatio)),
+		zap.String("LeaderUpdateRatio", fmt.Sprintf("%.4f", cfg.LeaderUpdateRatio)),
+		zap.String("EpochUpdateRatio", fmt.Sprintf("%.4f", cfg.EpochUpdateRatio)),
+		zap.String("SpaceUpdateRatio", fmt.Sprintf("%.4f", cfg.SpaceUpdateRatio)),
+		zap.String("FlowUpdateRatio", fmt.Sprintf("%.4f", cfg.FlowUpdateRatio)),
+		zap.String("RegionReportInterval", fmt.Sprintf("%d", cfg.RegionReportInterval)),
+		zap.String("Sample", fmt.Sprintf("%t", cfg.Sample)),
+		zap.String("InitEpochVer", fmt.Sprintf("%d", cfg.InitEpochVer)),
+		zap.String("StoreIdOffset", fmt.Sprintf("%d", cfg.StoreIdOffset)),
+		zap.String("RegionIdOffset", fmt.Sprintf("%d", cfg.RegionIdOffset)),
+		zap.String("PDAddr", cfg.PDAddr),
+		zap.String("StatusAddr", cfg.StatusAddr))
+
 	initClusterID(ctx, cli)
 	go runHTTPServer(cfg, options)
 	regions := new(Regions)
 	regions.init(cfg, options)
 	log.Info("finish init regions")
 	stores := newStores(cfg.StoreCount)
-	stores.update(regions)
-	bootstrap(ctx, cli)
+	stores.update(regions, cfg.StoreIdOffset)
+	bootstrap(ctx, cfg, cli)
 	putStores(ctx, cfg, cli, stores)
 	log.Info("finish put stores")
 	clis := make(map[uint64]pdpb.PDClient, cfg.StoreCount)
-	httpCli := pdHttp.NewClient("tools-heartbeat-bench", []string{cfg.PDAddr}, pdHttp.WithTLSConfig(loadTLSConfig(cfg)))
-	go deleteOperators(ctx, httpCli)
+	// httpCli := pdHttp.NewClient("tools-heartbeat-bench", []string{cfg.PDAddr}, pdHttp.WithTLSConfig(loadTLSConfig(cfg)))
+
+	// NOTE: disable deleteOperators since our cluster runs with PD on 7.1.0
+	// go deleteOperators(ctx, httpCli)
 	streams := make(map[uint64]pdpb.PD_RegionHeartbeatClient, cfg.StoreCount)
 	for i := 1; i <= cfg.StoreCount; i++ {
 		clis[uint64(i)], streams[uint64(i)] = createHeartbeatStream(ctx, cfg)
@@ -524,7 +543,8 @@ func main() {
 	header := &pdpb.RequestHeader{
 		ClusterId: clusterID,
 	}
-	var heartbeatTicker = time.NewTicker(regionReportInterval * time.Second)
+	log.Info("finish creating streams")
+	var heartbeatTicker = time.NewTicker(time.Duration(cfg.RegionReportInterval) * time.Second)
 	defer heartbeatTicker.Stop()
 	var resolvedTSTicker = time.NewTicker(time.Second)
 	defer resolvedTSTicker.Stop()
@@ -539,10 +559,13 @@ func main() {
 
 			startTime := time.Now()
 			wg := &sync.WaitGroup{}
-			for i := 1; i <= cfg.StoreCount; i++ {
+			for i := cfg.StoreIdOffset + 1; i <= uint64(cfg.StoreCount)+cfg.StoreIdOffset; i++ {
 				id := uint64(i)
 				wg.Add(1)
-				go regions.handleRegionHeartbeat(wg, streams[id], id, rep)
+				go func() {
+					time.Sleep(time.Duration(rand.Intn(int(cfg.RegionReportInterval))) * time.Second)
+					regions.handleRegionHeartbeat(wg, streams[id-cfg.StoreIdOffset], id, rep)
+				}()
 			}
 			wg.Wait()
 
@@ -560,15 +583,15 @@ func main() {
 			)
 			log.Info("store heartbeat stats", zap.String("max", fmt.Sprintf("%.4fs", since)))
 			regions.update(cfg, options)
-			go stores.update(regions) // update stores in background, unusually region heartbeat is slower than store update.
+			go stores.update(regions, cfg.StoreIdOffset) // update stores in background, unusually region heartbeat is slower than store update.
 		case <-resolvedTSTicker.C:
 			wg := &sync.WaitGroup{}
-			for i := 1; i <= cfg.StoreCount; i++ {
+			for i := cfg.StoreIdOffset + 1; i <= uint64(cfg.StoreCount)+cfg.StoreIdOffset; i++ {
 				id := uint64(i)
 				wg.Add(1)
 				go func(wg *sync.WaitGroup, id uint64) {
 					defer wg.Done()
-					cli := clis[id]
+					cli := clis[id-cfg.StoreIdOffset]
 					_, err := cli.ReportMinResolvedTS(ctx, &pdpb.ReportMinResolvedTsRequest{
 						Header:        header,
 						StoreId:       id,
